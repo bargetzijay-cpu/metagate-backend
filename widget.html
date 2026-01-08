@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MetaGate Chat</title>
+</head>
+<body>
+  <div id="log" style="height:220px;overflow:auto;border:1px solid #ccc;padding:8px;margin-bottom:8px;"></div>
+  <input id="msg" placeholder="type here" />
+  <button onclick="sendMsg()">send</button>
+
+<script>
+const vid = localStorage.getItem('vid') || crypto.randomUUID();
+localStorage.setItem('vid', vid);
+
+const log = document.getElementById('log');
+function addLine(who, text){
+  const d = document.createElement('div');
+  d.textContent = who + ": " + text;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function sendMsg(){
+  const text = document.getElementById('msg').value.trim();
+  if(!text) return;
+  document.getElementById('msg').value = '';
+  addLine("me", text);
+
+  await fetch('http://localhost:3000/message', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ visitor_id: vid, message: text })
+  });
+}
+
+async function poll(){
+  const r = await fetch('http://localhost:3000/poll?visitor_id=' + encodeURIComponent(vid));
+  const j = await r.json();
+  if(j.ok && j.replies){
+    j.replies.forEach(x => addLine("ajarn", x.text));
+  }
+}
+setInterval(poll, 1000);
+</script>
+</body>
+</html>
