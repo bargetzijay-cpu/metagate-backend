@@ -15,7 +15,8 @@ const TELEGRAM_TOKEN =
 const TELEGRAM_CHAT_ID =
   process.env.TELEGRAM_CHAT_ID || process.env.ADMIN_CHAT_ID;
 // ===== TELEGRAM BOT =====
-const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+const bot = new TelegramBot(TELEGRAM_TOKEN, { webHook: true });
+
 
 // ===== MIDDLEWARE =====
 app.use(cors());
