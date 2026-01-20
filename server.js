@@ -5,6 +5,9 @@ const cors = require("cors");
 const bodyParser = require("body-parser");
 const TelegramBot = require("node-telegram-bot-api");
 
+const multer = require("multer");
+const cloudinary = require("cloudinary").v2;
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -15,17 +18,22 @@ const TELEGRAM_TOKEN =
 const TELEGRAM_CHAT_ID =
   process.env.TELEGRAM_CHAT_ID || process.env.ADMIN_CHAT_ID;
 
-if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
-  console.error("❌ Telegram env vars missing");
-}
+// ===== CLOUDINARY =====
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 // ===== MIDDLEWARE =====
 app.use(cors());
 app.use(bodyParser.json());
 
-// ===== TELEGRAM BOT (WEBHOOK MODE) =====
-const bot = new TelegramBot(TELEGRAM_TOKEN, { webHook: true });
+// multer memory (pas de fichiers sur disque)
+const upload = multer({ storage: multer.memoryStorage() });
 
+// ===== TELEGRAM BOT (WEBHOOK) =====
+const bot = new TelegramBot(TELEGRAM_TOKEN, { webHook: true });
 const WEBHOOK_PATH = `/telegram/${TELEGRAM_TOKEN}`;
 
 app.post(WEBHOOK_PATH, (req, res) => {
@@ -36,18 +44,17 @@ app.post(WEBHOOK_PATH, (req, res) => {
 // ===== MEMORY STORE =====
 const messagesByVisitor = {};
 
-// ===== RECEIVE MESSAGE FROM WIDGET =====
+// ===== CLIENT -> TEXTE -> TELEGRAM =====
 app.post("/message", (req, res) => {
   const { visitor_id, message } = req.body;
-  if (!visitor_id || !message) {
-    return res.json({ ok: false });
-  }
+  if (!visitor_id || !message) return res.json({ ok: false });
 
   if (!messagesByVisitor[visitor_id]) {
     messagesByVisitor[visitor_id] = { inbox: [], outbox: [] };
   }
 
   messagesByVisitor[visitor_id].inbox.push({
+    type: "text",
     text: message,
     from: "visitor",
   });
@@ -60,10 +67,43 @@ app.post("/message", (req, res) => {
   res.json({ ok: true });
 });
 
-// ===== POLL REPLIES FOR WIDGET =====
+// ===== CLIENT -> PHOTO -> TELEGRAM =====
+app.post("/upload", upload.single("file"), async (req, res) => {
+  try {
+    const visitor_id = req.body.visitor_id;
+    const file = req.file;
+    if (!visitor_id || !file) return res.status(400).json({ ok: false });
+
+    if (!messagesByVisitor[visitor_id]) {
+      messagesByVisitor[visitor_id] = { inbox: [], outbox: [] };
+    }
+
+    // upload cloudinary
+    const uploaded = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        { folder: "metagate_chat" },
+        (err, result) => (err ? reject(err) : resolve(result))
+      );
+      stream.end(file.buffer);
+    });
+
+    const url = uploaded.secure_url;
+
+    // envoyer à Telegram
+    await bot.sendPhoto(TELEGRAM_CHAT_ID, url, {
+      caption: `🧿 MetaGate Photo\nVisitor: ${visitor_id}`,
+    });
+
+    res.json({ ok: true, url });
+  } catch (err) {
+    console.error("upload error", err);
+    res.status(500).json({ ok: false });
+  }
+});
+
+// ===== POLL (RETOUR VERS LE WIDGET) =====
 app.get("/poll", (req, res) => {
   const { visitor_id } = req.query;
-
   if (!visitor_id || !messagesByVisitor[visitor_id]) {
     return res.json({ ok: true, replies: [] });
   }
@@ -74,49 +114,53 @@ app.get("/poll", (req, res) => {
   res.json({ ok: true, replies });
 });
 
-// ===== RECEIVE TELEGRAM REPLY =====
-bot.on("message", (msg) => {
-  if (!msg.text) return;
-
+// ===== TELEGRAM -> TEXTE / PHOTO -> CLIENT =====
+bot.on("message", async (msg) => {
   let visitor_id = null;
-  let replyText = msg.text;
 
-  // 🧿 CAS 1 : tu replies à un message MetaGate
+  // 🔹 si reply à un message MetaGate
   if (msg.reply_to_message && msg.reply_to_message.text) {
-    const match = msg.reply_to_message.text.match(/Visitor:\s*([a-zA-Z0-9\-]+)/);
-    if (match) {
-      visitor_id = match[1];
-    }
+    const m = msg.reply_to_message.text.match(/Visitor:\s*([a-zA-Z0-9\-]+)/);
+    if (m) visitor_id = m[1];
   }
 
-  // 🧿 CAS 2 : tu écris @visitorid message
-  if (!visitor_id) {
-    const match = msg.text.match(/^@([a-zA-Z0-9\-]+)\s+([\s\S]+)/);
-    if (match) {
-      visitor_id = match[1];
-      replyText = match[2];
-    }
+  // 🔹 fallback @visitorid
+  if (!visitor_id && msg.text) {
+    const m = msg.text.match(/^@([a-zA-Z0-9\-]+)\s+([\s\S]+)/);
+    if (m) visitor_id = m[1];
   }
 
-  // 🧿 si on n'a toujours pas de visitor_id → on ignore
   if (!visitor_id) return;
 
   if (!messagesByVisitor[visitor_id]) {
     messagesByVisitor[visitor_id] = { inbox: [], outbox: [] };
   }
 
-  messagesByVisitor[visitor_id].outbox.push({
-    type: "text",
-    text: replyText,
-  });
-});
+  // TEXTE
+  if (msg.text && !msg.photo) {
+    const text = msg.text.replace(/^@[a-zA-Z0-9\-]+\s+/, "");
+    messagesByVisitor[visitor_id].outbox.push({
+      type: "text",
+      text,
+    });
+  }
 
+  // PHOTO
+  if (msg.photo && msg.photo.length) {
+    const best = msg.photo[msg.photo.length - 1];
+    const url = await bot.getFileLink(best.file_id);
+
+    messagesByVisitor[visitor_id].outbox.push({
+      type: "image",
+      url,
+    });
+  }
+});
 
 // ===== START SERVER =====
 app.listen(PORT, () => {
   console.log(`✅ MetaGate server running on port ${PORT}`);
 
-  // 🔥 REGISTER WEBHOOK AFTER SERVER IS LIVE
   const publicUrl = process.env.RENDER_EXTERNAL_URL;
   if (!publicUrl) {
     console.error("❌ RENDER_EXTERNAL_URL missing");
@@ -124,7 +168,6 @@ app.listen(PORT, () => {
   }
 
   const webhookUrl = `${publicUrl}${WEBHOOK_PATH}`;
-
   bot.setWebHook(webhookUrl).then(() => {
     console.log("✅ Telegram webhook set:", webhookUrl);
   });
