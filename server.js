@@ -76,6 +76,8 @@ app.get("/poll", (req, res) => {
 
 // ===== RECEIVE TELEGRAM REPLY =====
 bot.on("message", (msg) => {
+  console.log("📩 Telegram message received:", msg.text);
+
   if (!msg.text) return;
 
   const match = msg.text.match(/^@([a-zA-Z0-9\-]+)\s+([\s\S]+)/);
