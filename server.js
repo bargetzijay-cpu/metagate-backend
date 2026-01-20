@@ -76,15 +76,30 @@ app.get("/poll", (req, res) => {
 
 // ===== RECEIVE TELEGRAM REPLY =====
 bot.on("message", (msg) => {
-  console.log("📩 Telegram message received:", msg.text);
-
   if (!msg.text) return;
 
-  const match = msg.text.match(/^@([a-zA-Z0-9\-]+)\s+([\s\S]+)/);
-  if (!match) return;
+  let visitor_id = null;
+  let replyText = msg.text;
 
-  const visitor_id = match[1];
-  const replyText = match[2];
+  // 🧿 CAS 1 : tu replies à un message MetaGate
+  if (msg.reply_to_message && msg.reply_to_message.text) {
+    const match = msg.reply_to_message.text.match(/Visitor:\s*([a-zA-Z0-9\-]+)/);
+    if (match) {
+      visitor_id = match[1];
+    }
+  }
+
+  // 🧿 CAS 2 : tu écris @visitorid message
+  if (!visitor_id) {
+    const match = msg.text.match(/^@([a-zA-Z0-9\-]+)\s+([\s\S]+)/);
+    if (match) {
+      visitor_id = match[1];
+      replyText = match[2];
+    }
+  }
+
+  // 🧿 si on n'a toujours pas de visitor_id → on ignore
+  if (!visitor_id) return;
 
   if (!messagesByVisitor[visitor_id]) {
     messagesByVisitor[visitor_id] = { inbox: [], outbox: [] };
@@ -95,6 +110,7 @@ bot.on("message", (msg) => {
     text: replyText,
   });
 });
+
 
 // ===== START SERVER =====
 app.listen(PORT, () => {
