@@ -1,12 +1,12 @@
-require('dotenv').config();
+require("dotenv").config();
 
-const express = require('express');
-const cors = require('cors');
-const bodyParser = require('body-parser');
-const TelegramBot = require('node-telegram-bot-api');
+const express = require("express");
+const cors = require("cors");
+const bodyParser = require("body-parser");
+const TelegramBot = require("node-telegram-bot-api");
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 // ===== CONFIG =====
 const TELEGRAM_TOKEN =
@@ -14,36 +14,30 @@ const TELEGRAM_TOKEN =
 
 const TELEGRAM_CHAT_ID =
   process.env.TELEGRAM_CHAT_ID || process.env.ADMIN_CHAT_ID;
-// ===== TELEGRAM BOT =====
-const bot = new TelegramBot(TELEGRAM_TOKEN, { webHook: true });
 
+if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+  console.error("❌ Telegram env vars missing");
+}
 
 // ===== MIDDLEWARE =====
 app.use(cors());
 app.use(bodyParser.json());
 
-const WEBHOOK_PATH = `/telegram/${TELEGRAM_TOKEN}`;
+// ===== TELEGRAM BOT (WEBHOOK MODE) =====
+const bot = new TelegramBot(TELEGRAM_TOKEN, { webHook: true });
 
-bot.setWebHook(`${process.env.RENDER_EXTERNAL_URL}${WEBHOOK_PATH}`);
+const WEBHOOK_PATH = `/telegram/${TELEGRAM_TOKEN}`;
 
 app.post(WEBHOOK_PATH, (req, res) => {
   bot.processUpdate(req.body);
   res.sendStatus(200);
 });
 
-
-// ===== MEMORY STORE (simple, volontairement) =====
-const messagesByVisitor = {}; 
-// structure:
-// {
-//   visitor_id: {
-//     inbox: [ { text, from } ],
-//     outbox: [ { text } ]
-//   }
-// }
+// ===== MEMORY STORE =====
+const messagesByVisitor = {};
 
 // ===== RECEIVE MESSAGE FROM WIDGET =====
-app.post('/message', (req, res) => {
+app.post("/message", (req, res) => {
   const { visitor_id, message } = req.body;
   if (!visitor_id || !message) {
     return res.json({ ok: false });
@@ -55,10 +49,9 @@ app.post('/message', (req, res) => {
 
   messagesByVisitor[visitor_id].inbox.push({
     text: message,
-    from: 'visitor'
+    from: "visitor",
   });
 
-  // send to telegram
   bot.sendMessage(
     TELEGRAM_CHAT_ID,
     `🧿 MetaGate\nVisitor: ${visitor_id}\n\n${message}`
@@ -68,8 +61,9 @@ app.post('/message', (req, res) => {
 });
 
 // ===== POLL REPLIES FOR WIDGET =====
-app.get('/poll', (req, res) => {
+app.get("/poll", (req, res) => {
   const { visitor_id } = req.query;
+
   if (!visitor_id || !messagesByVisitor[visitor_id]) {
     return res.json({ ok: true, replies: [] });
   }
@@ -81,10 +75,10 @@ app.get('/poll', (req, res) => {
 });
 
 // ===== RECEIVE TELEGRAM REPLY =====
-bot.on('message', msg => {
+bot.on("message", (msg) => {
   if (!msg.text) return;
 
-  const match = msg.text.match(/^@([a-zA-Z0-9\-]+)\s+(.+)/);
+  const match = msg.text.match(/^@([a-zA-Z0-9\-]+)\s+([\s\S]+)/);
   if (!match) return;
 
   const visitor_id = match[1];
@@ -95,11 +89,25 @@ bot.on('message', msg => {
   }
 
   messagesByVisitor[visitor_id].outbox.push({
-    text: replyText
+    type: "text",
+    text: replyText,
   });
 });
 
 // ===== START SERVER =====
 app.listen(PORT, () => {
-  console.log(`MetaGate server running on port ${PORT}`);
+  console.log(`✅ MetaGate server running on port ${PORT}`);
+
+  // 🔥 REGISTER WEBHOOK AFTER SERVER IS LIVE
+  const publicUrl = process.env.RENDER_EXTERNAL_URL;
+  if (!publicUrl) {
+    console.error("❌ RENDER_EXTERNAL_URL missing");
+    return;
+  }
+
+  const webhookUrl = `${publicUrl}${WEBHOOK_PATH}`;
+
+  bot.setWebHook(webhookUrl).then(() => {
+    console.log("✅ Telegram webhook set:", webhookUrl);
+  });
 });
