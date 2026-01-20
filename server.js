@@ -12,11 +12,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ===== CONFIG =====
-const TELEGRAM_TOKEN =
-  process.env.TELEGRAM_TOKEN || process.env.BOT_TOKEN;
-
-const TELEGRAM_CHAT_ID =
-  process.env.TELEGRAM_CHAT_ID || process.env.ADMIN_CHAT_ID;
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || process.env.BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || process.env.ADMIN_CHAT_ID;
 
 // ===== CLOUDINARY =====
 cloudinary.config({
@@ -44,6 +41,33 @@ app.post(WEBHOOK_PATH, (req, res) => {
 // ===== MEMORY STORE =====
 const messagesByVisitor = {};
 
+// ===== LONG-POLL STATE =====
+const pendingPollByVisitor = {}; // visitor_id -> { res, timer }
+
+// helper: push reply and instantly wake pending poll if exists
+function pushReply(visitor_id, reply) {
+  if (!messagesByVisitor[visitor_id]) {
+    messagesByVisitor[visitor_id] = { inbox: [], outbox: [] };
+  }
+
+  messagesByVisitor[visitor_id].outbox.push(reply);
+
+  const pending = pendingPollByVisitor[visitor_id];
+  if (pending && pending.res) {
+    try { clearTimeout(pending.timer); } catch (e) {}
+
+    const replies = messagesByVisitor[visitor_id].outbox;
+    messagesByVisitor[visitor_id].outbox = [];
+    delete pendingPollByVisitor[visitor_id];
+
+    try {
+      return pending.res.json({ ok: true, replies });
+    } catch (e) {
+      // if response already closed, ignore
+    }
+  }
+}
+
 // ===== CLIENT -> TEXTE -> TELEGRAM =====
 app.post("/message", (req, res) => {
   const { visitor_id, message } = req.body;
@@ -59,6 +83,7 @@ app.post("/message", (req, res) => {
     from: "visitor",
   });
 
+  // send to telegram
   bot.sendMessage(
     TELEGRAM_CHAT_ID,
     `🧿 MetaGate\nVisitor: ${visitor_id}\n\n${message}`
@@ -94,38 +119,13 @@ app.post("/upload", upload.single("file"), async (req, res) => {
       caption: `🧿 MetaGate Photo\nVisitor: ${visitor_id}`,
     });
 
+    // (optionnel) si tu veux aussi afficher au client la vraie URL (ton front le fait déjà)
     res.json({ ok: true, url });
   } catch (err) {
     console.error("upload error", err);
     res.status(500).json({ ok: false });
   }
 });
-
-// ===== LONG-POLL STATE =====
-const pendingPollByVisitor = {}; // visitor_id -> { res, timer }
-
-// helper: push reply and instantly wake pending poll if exists
-function pushReply(visitor_id, reply) {
-  if (!messagesByVisitor[visitor_id]) {
-    messagesByVisitor[visitor_id] = { inbox: [], outbox: [] };
-  }
-
-  messagesByVisitor[visitor_id].outbox.push(reply);
-
-  // If a poll request is waiting, answer immediately
-  const pending = pendingPollByVisitor[visitor_id];
-  if (pending && pending.res) {
-    try {
-      clearTimeout(pending.timer);
-    } catch (e) {}
-
-    const replies = messagesByVisitor[visitor_id].outbox;
-    messagesByVisitor[visitor_id].outbox = [];
-    delete pendingPollByVisitor[visitor_id];
-
-    return pending.res.json({ ok: true, replies });
-  }
-}
 
 // ===== POLL (LONG-POLL, INSTANT, SAFE) =====
 app.get("/poll", (req, res) => {
@@ -145,17 +145,12 @@ app.get("/poll", (req, res) => {
 
   // If another poll is already waiting, close it (avoid duplicates)
   if (pendingPollByVisitor[visitor_id] && pendingPollByVisitor[visitor_id].res) {
-    try {
-      pendingPollByVisitor[visitor_id].res.json({ ok: true, replies: [] });
-    } catch (e) {}
-    try {
-      clearTimeout(pendingPollByVisitor[visitor_id].timer);
-    } catch (e) {}
+    try { pendingPollByVisitor[visitor_id].res.json({ ok: true, replies: [] }); } catch (e) {}
+    try { clearTimeout(pendingPollByVisitor[visitor_id].timer); } catch (e) {}
   }
 
   // Hold this request up to 25s
   const timer = setTimeout(() => {
-    // timeout: return empty
     if (pendingPollByVisitor[visitor_id] && pendingPollByVisitor[visitor_id].res === res) {
       delete pendingPollByVisitor[visitor_id];
     }
@@ -164,7 +159,6 @@ app.get("/poll", (req, res) => {
 
   pendingPollByVisitor[visitor_id] = { res, timer };
 
-  // If client disconnects, cleanup
   req.on("close", () => {
     const p = pendingPollByVisitor[visitor_id];
     if (p && p.res === res) {
@@ -174,48 +168,40 @@ app.get("/poll", (req, res) => {
   });
 });
 
-
-
 // ===== TELEGRAM -> TEXTE / PHOTO -> CLIENT =====
 bot.on("message", async (msg) => {
   let visitor_id = null;
 
-  // 🔹 si reply à un message MetaGate
+  // 1) si reply à un message MetaGate
   if (msg.reply_to_message && msg.reply_to_message.text) {
     const m = msg.reply_to_message.text.match(/Visitor:\s*([a-zA-Z0-9\-]+)/);
     if (m) visitor_id = m[1];
   }
 
-  // 🔹 fallback @visitorid
+  // 2) fallback: @visitorid
+  let replyText = msg.text || "";
   if (!visitor_id && msg.text) {
     const m = msg.text.match(/^@([a-zA-Z0-9\-]+)\s+([\s\S]+)/);
-    if (m) visitor_id = m[1];
+    if (m) {
+      visitor_id = m[1];
+      replyText = m[2];
+    }
   }
 
   if (!visitor_id) return;
 
-  if (!messagesByVisitor[visitor_id]) {
-    messagesByVisitor[visitor_id] = { inbox: [], outbox: [] };
-  }
-
   // TEXTE
   if (msg.text && !msg.photo) {
-    const text = msg.text.replace(/^@[a-zA-Z0-9\-]+\s+/, "");
-    messagesByVisitor[visitor_id].outbox.push({
-      type: "text",
-      text,
-    });
+    // si c'était un reply normal, on garde le texte tel quel
+    // si c'était @visitorid message, replyText contient déjà la bonne partie
+    pushReply(visitor_id, { type: "text", text: replyText });
   }
 
-  // PHOTO
+  // PHOTO (Telegram -> client)
   if (msg.photo && msg.photo.length) {
     const best = msg.photo[msg.photo.length - 1];
     const url = await bot.getFileLink(best.file_id);
-
-    messagesByVisitor[visitor_id].outbox.push({
-      type: "image",
-      url,
-    });
+    pushReply(visitor_id, { type: "image", url });
   }
 });
 
