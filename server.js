@@ -22,6 +22,16 @@ const bot = new TelegramBot(TELEGRAM_TOKEN, { webHook: true });
 app.use(cors());
 app.use(bodyParser.json());
 
+const WEBHOOK_PATH = `/telegram/${TELEGRAM_TOKEN}`;
+
+bot.setWebHook(`${process.env.RENDER_EXTERNAL_URL}${WEBHOOK_PATH}`);
+
+app.post(WEBHOOK_PATH, (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
+});
+
+
 // ===== MEMORY STORE (simple, volontairement) =====
 const messagesByVisitor = {}; 
 // structure:
