@@ -101,18 +101,48 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-// ===== POLL (RETOUR VERS LE WIDGET) =====
+// ===== LONG-POLL REPLIES FOR WIDGET (instant) =====
 app.get("/poll", (req, res) => {
   const { visitor_id } = req.query;
-  if (!visitor_id || !messagesByVisitor[visitor_id]) {
-    return res.json({ ok: true, replies: [] });
+
+  if (!visitor_id) return res.json({ ok: true, replies: [] });
+
+  if (!messagesByVisitor[visitor_id]) {
+    messagesByVisitor[visitor_id] = { inbox: [], outbox: [] };
   }
 
-  const replies = messagesByVisitor[visitor_id].outbox;
-  messagesByVisitor[visitor_id].outbox = [];
+  // If we already have replies, return immediately
+  const out = messagesByVisitor[visitor_id].outbox;
+  if (out.length) {
+    messagesByVisitor[visitor_id].outbox = [];
+    return res.json({ ok: true, replies: out });
+  }
 
-  res.json({ ok: true, replies });
+  // Otherwise keep the request open until something arrives (or timeout)
+  const start = Date.now();
+  const timeoutMs = 25000; // 25s
+
+  const timer = setInterval(() => {
+    const box = messagesByVisitor[visitor_id]?.outbox || [];
+
+    if (box.length) {
+      clearInterval(timer);
+      messagesByVisitor[visitor_id].outbox = [];
+      return res.json({ ok: true, replies: box });
+    }
+
+    if (Date.now() - start > timeoutMs) {
+      clearInterval(timer);
+      return res.json({ ok: true, replies: [] });
+    }
+  }, 300);
+
+  // If client disconnects, stop the timer
+  req.on("close", () => {
+    clearInterval(timer);
+  });
 });
+
 
 // ===== TELEGRAM -> TEXTE / PHOTO -> CLIENT =====
 bot.on("message", async (msg) => {
