@@ -101,10 +101,35 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-// ===== LONG-POLL REPLIES FOR WIDGET (instant) =====
+// ===== LONG-POLL STATE =====
+const pendingPollByVisitor = {}; // visitor_id -> { res, timer }
+
+// helper: push reply and instantly wake pending poll if exists
+function pushReply(visitor_id, reply) {
+  if (!messagesByVisitor[visitor_id]) {
+    messagesByVisitor[visitor_id] = { inbox: [], outbox: [] };
+  }
+
+  messagesByVisitor[visitor_id].outbox.push(reply);
+
+  // If a poll request is waiting, answer immediately
+  const pending = pendingPollByVisitor[visitor_id];
+  if (pending && pending.res) {
+    try {
+      clearTimeout(pending.timer);
+    } catch (e) {}
+
+    const replies = messagesByVisitor[visitor_id].outbox;
+    messagesByVisitor[visitor_id].outbox = [];
+    delete pendingPollByVisitor[visitor_id];
+
+    return pending.res.json({ ok: true, replies });
+  }
+}
+
+// ===== POLL (LONG-POLL, INSTANT, SAFE) =====
 app.get("/poll", (req, res) => {
   const { visitor_id } = req.query;
-
   if (!visitor_id) return res.json({ ok: true, replies: [] });
 
   if (!messagesByVisitor[visitor_id]) {
@@ -112,36 +137,43 @@ app.get("/poll", (req, res) => {
   }
 
   // If we already have replies, return immediately
-  const out = messagesByVisitor[visitor_id].outbox;
-  if (out.length) {
+  const existing = messagesByVisitor[visitor_id].outbox;
+  if (existing.length) {
     messagesByVisitor[visitor_id].outbox = [];
-    return res.json({ ok: true, replies: out });
+    return res.json({ ok: true, replies: existing });
   }
 
-  // Otherwise keep the request open until something arrives (or timeout)
-  const start = Date.now();
-  const timeoutMs = 25000; // 25s
+  // If another poll is already waiting, close it (avoid duplicates)
+  if (pendingPollByVisitor[visitor_id] && pendingPollByVisitor[visitor_id].res) {
+    try {
+      pendingPollByVisitor[visitor_id].res.json({ ok: true, replies: [] });
+    } catch (e) {}
+    try {
+      clearTimeout(pendingPollByVisitor[visitor_id].timer);
+    } catch (e) {}
+  }
 
-  const timer = setInterval(() => {
-    const box = messagesByVisitor[visitor_id]?.outbox || [];
-
-    if (box.length) {
-      clearInterval(timer);
-      messagesByVisitor[visitor_id].outbox = [];
-      return res.json({ ok: true, replies: box });
+  // Hold this request up to 25s
+  const timer = setTimeout(() => {
+    // timeout: return empty
+    if (pendingPollByVisitor[visitor_id] && pendingPollByVisitor[visitor_id].res === res) {
+      delete pendingPollByVisitor[visitor_id];
     }
+    res.json({ ok: true, replies: [] });
+  }, 25000);
 
-    if (Date.now() - start > timeoutMs) {
-      clearInterval(timer);
-      return res.json({ ok: true, replies: [] });
-    }
-  }, 300);
+  pendingPollByVisitor[visitor_id] = { res, timer };
 
-  // If client disconnects, stop the timer
+  // If client disconnects, cleanup
   req.on("close", () => {
-    clearInterval(timer);
+    const p = pendingPollByVisitor[visitor_id];
+    if (p && p.res === res) {
+      try { clearTimeout(p.timer); } catch (e) {}
+      delete pendingPollByVisitor[visitor_id];
+    }
   });
 });
+
 
 
 // ===== TELEGRAM -> TEXTE / PHOTO -> CLIENT =====
