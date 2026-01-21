@@ -41,6 +41,9 @@ app.post(WEBHOOK_PATH, (req, res) => {
 // ===== MEMORY STORE =====
 const messagesByVisitor = {};
 
+let lastAdminActivity = null; // timestamp (ms) de ta dernière réponse Telegram
+
+
 // ===== LONG-POLL STATE =====
 const pendingPollByVisitor = {}; // visitor_id -> { res, timer }
 
@@ -127,6 +130,11 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   }
 });
 
+app.get("/status", (req, res) => {
+  res.json({ ok: true, lastSeen: lastAdminActivity });
+});
+
+
 // ===== POLL (LONG-POLL, INSTANT, SAFE) =====
 app.get("/poll", (req, res) => {
   const { visitor_id } = req.query;
@@ -194,6 +202,8 @@ bot.on("message", async (msg) => {
   if (msg.text && !msg.photo) {
     // si c'était un reply normal, on garde le texte tel quel
     // si c'était @visitorid message, replyText contient déjà la bonne partie
+    lastAdminActivity = Date.now();
+
     pushReply(visitor_id, { type: "text", text: replyText });
   }
 
@@ -201,6 +211,8 @@ bot.on("message", async (msg) => {
   if (msg.photo && msg.photo.length) {
     const best = msg.photo[msg.photo.length - 1];
     const url = await bot.getFileLink(best.file_id);
+    lastAdminActivity = Date.now();
+
     pushReply(visitor_id, { type: "image", url });
   }
 });
